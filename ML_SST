@@ -1,0 +1,472 @@
+#Data source & access (no manual download)**
+#Dataset:NOAA OISST v2 monthly mean SST (NetCDF).
+#In Google Colab, I access the NetCDF directly from the NOAA PSL HTTPS server using a URL.
+#I did not manually download a file to my computer. The data is read programmatically:
+#Either streamed into memory (BytesIO buffer) and opened with xarray, OR
+#Opened directly via xarray from the remote URL (depending on engine).
+#For the deliverables (raw/cleaned datasets), I can export:
+#1) a regional/time subset as NetCDF (“raw subset”), and
+#2) the processed monthly table as CSV (“cleaned dataset”).
+
+
+
+
+#Mount Google Drive
+from google.colab import drive
+drive.mount('/content/drive')
+#Study Area Map (Bathymetry)
+!pip -q install cartopy netCDF4 h5netcdf
+import xarray as xr
+import numpy as np
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
+from matplotlib.colors import BoundaryNorm
+# 1. File path
+gebco_file = "/content/drive/MyDrive/Data/GEBCO_2024_CF.nc"
+# 2. Study region
+lon_min, lon_max = 80, 100
+lat_min, lat_max = 5, 25
+# 3. Open GEBCO data
+ds = xr.open_dataset(gebco_file)
+print(ds)
+# GEBCO usually uses variable name "elevation"
+# elevation: positive = land, negative = ocean depth
+elev = ds["elevation"]
+# 4.Subset region
+elev_sub = elev.sel(
+    lon=slice(lon_min, lon_max),
+    lat=slice(lat_min, lat_max)
+)
+# Optional: coarsen if plotting is slow
+# Keep this ON for faster plotting in Colab
+elev_sub = elev_sub.coarsen(lat=2, lon=2, boundary="trim").mean()
+lon = elev_sub["lon"]
+lat = elev_sub["lat"]
+# 5. Separate ocean and land
+ocean_depth = elev_sub.where(elev_sub < 0)
+land = elev_sub.where(elev_sub >= 0)
+# Convert depth to positive values for colorbar
+depth_positive = -ocean_depth
+# 6. Plot
+fig = plt.figure(figsize=(9, 8), dpi=300)
+ax = plt.axes(projection=ccrs.PlateCarree())
+ax.set_extent(
+    [lon_min, lon_max, lat_min, lat_max],
+    crs=ccrs.PlateCarree()
+)
+# Bathymetry filled color
+depth_levels = [0, 20, 50, 100, 200, 500, 1000, 2000, 3000, 4000, 5000]
+cmap = plt.cm.Blues
+norm = BoundaryNorm(depth_levels, cmap.N)
+bath = ax.pcolormesh(
+    lon,
+    lat,
+    depth_positive,
+    cmap=cmap,
+    norm=norm,
+    shading="auto",
+    transform=ccrs.PlateCarree()
+)
+# Land mask
+ax.contourf(
+    lon,
+    lat,
+    land,
+    levels=[0, 9000],
+    colors=["lightgray"],
+    transform=ccrs.PlateCarree(),
+    zorder=3
+)
+# Coastline and borders
+ax.coastlines(resolution="10m", linewidth=1.0, color="black", zorder=5)
+ax.add_feature(
+    cfeature.BORDERS,
+    linewidth=0.6,
+    edgecolor="black",
+    zorder=5
+)
+# Bathymetry contour lines
+contour_levels = [-4000, -3000, -2000, -1000, -500, -200] # Changed to increasing order
+cs = ax.contour(
+    lon,
+    lat,
+    elev_sub,
+    levels=contour_levels,
+    colors="black",
+    linewidths=0.5,
+    alpha=0.6,
+    transform=ccrs.PlateCarree(),
+    zorder=4
+)
+ax.clabel(
+    cs,
+    inline=True,
+    fontsize=7,
+    fmt="%d m"
+)
+# Hatching for shallow shelf / selected sea region
+# Example: ocean shallower than 200 m
+shelf_mask = elev_sub.where((elev_sub < 0) & (elev_sub >= -200))
+ax.contourf(
+    lon,
+    lat,
+    shelf_mask,
+    levels=[-200, 0],
+    colors="none",
+    hatches=["///"],
+    transform=ccrs.PlateCarree(),
+    zorder=6
+)
+# Add gridlines
+gl = ax.gridlines(
+    draw_labels=True,
+    linewidth=0.4,
+    color="gray",
+    alpha=0.5,
+    linestyle="--"
+)
+gl.top_labels = False
+gl.right_labels = False
+gl.xlabel_style = {"size": 10}
+gl.ylabel_style = {"size": 10}
+ax.xaxis.set_major_formatter(LongitudeFormatter())
+ax.yaxis.set_major_formatter(LatitudeFormatter())
+# Add labels
+ax.text(
+    90, 16,
+    "Bay of Bengal",
+    fontsize=12,
+    color="darkgreen",
+    fontweight="bold",
+    transform=ccrs.PlateCarree()
+)
+ax.text(
+    88.5, 24.5,
+    "Bangladesh",
+    fontsize=9,
+    color="red",
+    fontweight="bold",
+    transform=ccrs.PlateCarree()
+)
+# Colorbar
+cbar = plt.colorbar(
+    bath,
+    ax=ax,
+    orientation="vertical",
+    shrink=0.75,
+    pad=0.03,
+    ticks=depth_levels
+)
+cbar.set_label("Ocean depth (m)", fontsize=11)
+plt.tight_layout()
+# Save figure
+out_fig = "/content/Bay_of_Bengal_Bathymetry_Map.png"
+plt.savefig(out_fig, dpi=300, bbox_inches="tight")
+plt.show()
+print("Saved figure:", out_fig)
+
+
+
+
+#2) NOAA PSL (Monthly OISST)
+import xarray as xr
+import fsspec
+import io
+# Remote NOAA PSL NetCDF file (accessed via HTTPS)
+url = "https://downloads.psl.noaa.gov/Datasets/noaa.oisst.v2/sst.mnmean.nc"
+# NOTE:
+# - This does NOT require you to manually download a file in advance.
+# - Colab reads the file from the remote server.
+# - Here I read it into RAM (BytesIO). Nothing is permanently saved unless I export it myselves.
+with fsspec.open(url, "rb") as f:
+    buffer = io.BytesIO(f.read())
+# Open the NetCDF dataset from the in-memory buffer
+ds = xr.open_dataset(buffer, engine='scipy')
+print(ds)
+
+
+
+#Open dataset from my buffer
+import xarray as xr
+ds = xr.open_dataset(buffer)
+ds
+#3) Subset time: 2000–2023 & Subset Bay of Bengal box
+# Subset the analysis period
+ds_2000_2023 = ds.sel(time=slice("2000-01-01", "2023-12-31"))
+# Subset Bay of Bengal region (5°–25°N, 80°–100°E)
+# NOTE: Some datasets store latitude in descending order, so I slice(25, 5).
+bob = ds_2000_2023.sel(
+    lat=slice(25, 5),
+    lon=slice(80, 100)
+)
+bob
+
+
+#Install & imports
+import numpy as np
+import pandas as pd
+import xarray as xr
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+plt.rcParams["figure.figsize"] = (10, 5)
+plt.rcParams["font.size"] = 12
+4) Area-mean SST time series for Bay of Bengal
+# Compute area-mean SST over the Bay of Bengal for each month
+sst_bob = bob["sst"].mean(dim=["lat", "lon"])
+# Convert to a tidy pandas table: time + SST
+df = sst_bob.to_dataframe(name="sst").reset_index()
+# Time features (year/month + a running time index)
+df["year"] = df["time"].dt.year
+df["month"] = df["time"].dt.month
+df["t_index"] = np.arange(len(df))
+# Drop any missing values
+df = df.dropna(subset=["sst"]).reset_index(drop=True)
+df.head()
+
+
+
+
+
+#Long-term trend
+plt.figure()
+plt.plot(df["time"], df["sst"])
+plt.xlabel("Year")
+plt.ylabel("SST (°C)")
+plt.title("Bay of Bengal Monthly Mean SST (2000–2023)")
+plt.grid(True)
+plt.show()
+
+
+
+
+#Mean seasonal cycle (climatology)
+seasonal = df.groupby("month")["sst"].mean()
+plt.figure()
+plt.plot(seasonal.index, seasonal.values, marker="o")
+plt.xlabel("Month")
+plt.ylabel("SST (°C)")
+plt.title("Seasonal Cycle of SST in Bay of Bengal")
+plt.xticks(range(1, 13))
+plt.grid(True)
+plt.show()
+
+
+
+#5) Prepare data for ML
+
+# Encode month seasonality as cyclic features (avoids treating Dec and Jan as “far apart”)
+df["month_sin"] = np.sin(2 * np.pi * df["month"] / 12)
+df["month_cos"] = np.cos(2 * np.pi * df["month"] / 12)
+# Features: long-term time index + seasonal cycle
+feature_cols = ["t_index", "month_sin", "month_cos"]
+X = df[feature_cols].values
+# Target: use SST or SST anomaly depending on your choice
+y = df["sst"].values    # or df["sst_anom"].values if using anomalies
+# Train/test split WITHOUT shuffling to preserve time order (important for time series)
+X_train, X_test, y_train, y_test, time_train, time_test = train_test_split(
+    X, y, df["time"].values, test_size=0.2, shuffle=False
+)
+
+
+
+
+
+#6)Train Linear Regression & Random Forest
+linreg = LinearRegression()
+linreg.fit(X_train, y_train)
+y_pred_lr = linreg.predict(X_test)
+mse_lr = mean_squared_error(y_test, y_pred_lr)
+rmse_lr = np.sqrt(mse_lr)
+mae_lr = mean_absolute_error(y_test, y_pred_lr)
+r2_lr = r2_score(y_test, y_pred_lr)
+print("Linear Regression:")
+print(f"  RMSE = {rmse_lr:.3f} °C")
+print(f"  MAE  = {mae_lr:.3f} °C")
+print(f"  R²   = {r2_lr:.3f}")
+
+
+
+#Random Forest Regressor
+rf = RandomForestRegressor(
+    n_estimators=300,
+    max_depth=6,
+    random_state=42
+)
+rf.fit(X_train, y_train)
+y_pred_rf = rf.predict(X_test)
+mse_rf = mean_squared_error(y_test, y_pred_rf)
+rmse_rf = np.sqrt(mse_rf)
+mae_rf = mean_absolute_error(y_test, y_pred_rf)
+r2_rf = r2_score(y_test, y_pred_rf)
+print("Random Forest:")
+print(f"  RMSE = {rmse_rf:.3f} °C")
+print(f"  MAE  = {mae_rf:.3f} °C")
+print(f"  R²   = {r2_rf:.3f}")
+
+
+
+#7) Professional-looking comparison plots
+plt.figure()
+plt.plot(time_test, y_test, label="Observed", linewidth=2)
+plt.plot(time_test, y_pred_lr, label="Linear Regression", linestyle="--")
+plt.plot(time_test, y_pred_rf, label="Random Forest", linestyle=":")
+plt.xlabel("Year")
+plt.ylabel("SST (°C)")
+plt.title("SST Prediction over Bay of Bengal – Test Period")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+
+
+#Scatter: predicted vs observed
+def scatter_plot(y_true, y_pred, title):
+    plt.figure()
+    plt.scatter(y_true, y_pred, alpha=0.7)
+    min_val = min(y_true.min(), y_pred.min())
+    max_val = max(y_true.max(), y_pred.max())
+    plt.plot([min_val, max_val], [min_val, max_val], "k--", linewidth=2)
+    plt.xlabel("Observed SST (°C)")
+    plt.ylabel("Predicted SST (°C)")
+    plt.title(title)
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+scatter_plot(y_test, y_pred_lr, "Observed vs Predicted SST – Linear Regression")
+scatter_plot(y_test, y_pred_rf, "Observed vs Predicted SST – Random Forest")
+
+
+
+#Residuals over time (for Random Forest)
+residuals_rf = y_test - y_pred_rf
+plt.figure()
+plt.axhline(0, color="k", linewidth=1)
+plt.plot(time_test, residuals_rf, marker="o", linestyle="-")
+plt.xlabel("Year")
+plt.ylabel("Residual (Observed − Predicted) [°C]")
+plt.title("Random Forest Residuals – Test Period")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+
+
+#8) Map of SST anomalies for a selected year (Bay of Bengal)
+!apt-get install -y libproj-dev proj-data proj-bin libgeos-dev
+!pip install cartopy
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import numpy as np
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+proj = ccrs.PlateCarree()
+sst_grid = bob["sst"]
+clim = sst_grid.groupby("time.month").mean("time")
+anom = sst_grid.groupby("time.month") - clim
+year_sel  = 2023
+month_sel = 1
+time_str  = f"{year_sel}-{month_sel:02d}-01"
+anom_sel = anom.sel(time=time_str)
+vmax = float(np.nanmax(np.abs(anom_sel.values)))
+vmin = -vmax
+fig = plt.figure(figsize=(14, 6))
+ax1 = fig.add_subplot(1, 2, 1)
+mesh1 = ax1.pcolormesh(
+    anom_sel["lon"],
+    anom_sel["lat"],
+    anom_sel,
+    cmap="coolwarm",
+    shading="auto",
+    vmin=vmin,
+    vmax=vmax
+)
+ax1.set_xlabel("Longitude (°E)")
+ax1.set_ylabel("Latitude (°N)")
+ax1.set_title(f"SST Anomalies (No Map)\nBay of Bengal – {year_sel}-01")
+ax1.grid(True, linestyle="--", linewidth=0.5, alpha=0.7)
+yticks = np.arange(5, 26, 5)
+ax1.set_yticks(yticks)
+ax1.set_yticklabels([f"{lat:.0f}°N" for lat in yticks])
+for label in ax1.get_yticklabels():
+    label.set_rotation(90)
+    label.set_verticalalignment("center")
+    label.set_horizontalalignment("right")
+ax1.set_aspect("equal", adjustable="box")
+fig.colorbar(mesh1, ax=ax1, label="SST Anomaly (°C)")
+ax2 = fig.add_subplot(1, 2, 2, projection=proj)
+mesh2 = ax2.pcolormesh(
+    anom_sel["lon"],
+    anom_sel["lat"],
+    anom_sel,
+    cmap="coolwarm",
+    shading="auto",
+    vmin=vmin,
+    vmax=vmax,
+    transform=proj,
+    zorder=0
+)
+ax2.add_feature(
+    cfeature.LAND,
+    facecolor="lightgray",
+    edgecolor="black",
+    zorder=1
+)
+ax2.coastlines(resolution="110m", linewidth=0.8, zorder=2)
+ax2.set_extent([80, 100, 5, 25], crs=proj)
+gl = ax2.gridlines(
+    draw_labels=True,
+    linestyle="--",
+    linewidth=0.5,
+    alpha=0.7
+)
+gl.top_labels = False
+gl.right_labels = False
+gl.ylabel_style = {"rotation": 90, "va": "center", "ha": "right"}
+ax2.set_title(f"SST Anomalies on PlateCarree Map\nBay of Bengal – {year_sel}-01")
+fig.colorbar(mesh2, ax=ax2, label="SST Anomaly (°C)")
+plt.suptitle(
+    f"Bay of Bengal Sea Surface Temperature Anomalies – January {year_sel}",
+    fontsize=14,
+    y=1.02
+)
+plt.tight_layout()
+plt.show()
+
+
+
+# 1) "Raw subset": Bay of Bengal + 2000–2023 SST grid (NetCDF)
+# 2) "Cleaned dataset": area-mean monthly table used for ML (CSV)
+# If you want to save to Google Drive:
+# from google.colab import drive
+# drive.mount("/content/drive")
+# Choose an output folder (Drive recommended)
+out_dir = "."  # any of your mounted google drive path
+# Raw subset (regional/time subset of the original dataset)
+bob.to_netcdf(f"{out_dir}/OISST_BoB_2000_2023_raw_subset.nc")
+# Cleaned ML table
+df.to_csv(f"{out_dir}/BoB_monthly_SST_cleaned.csv", index=False)
+print("Export complete!")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
